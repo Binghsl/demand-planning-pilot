@@ -4,13 +4,15 @@ from prophet import Prophet
 import plotly.express as px
 
 st.set_page_config(page_title="Demand Planning Tool", layout="wide")
-st.title("📦 AI-Powered Demand Planning Tool (PN Forecast + Inventory Risk)")
+st.title("📦 AI-Powered Demand Planning Tool (PN Forecast + Inventory Risk + OS Comparison)")
 
 MIN_DATA_POINTS = 3
 
+# Upload Section
 uploaded_file = st.file_uploader("Upload Sales Forecast Excel File (.xlsx)", type=["xlsx"])
 inv_file = st.file_uploader("Upload Inventory Data (.xlsx, columns: PN, On Hand, In Transit)", type=["xlsx"])
 bo_file = st.file_uploader("Upload Backorder Data (.xlsx, columns: PN, Backorder)", type=["xlsx"])
+os_file = st.file_uploader("Upload OS-Flagged Overstock PNs (.xlsx, single 'PN' column)", type=["xlsx"])
 
 if uploaded_file:
     df_raw = pd.read_excel(uploaded_file, header=1)
@@ -29,6 +31,7 @@ if uploaded_file:
     st.subheader("📄 Cleaned Sales Data Preview")
     st.dataframe(df.head())
 
+    # Forecasting
     valid_pns = [
         pn for pn, group in df.groupby("PN")
         if group["Date"].nunique() >= MIN_DATA_POINTS
@@ -86,7 +89,7 @@ if uploaded_file:
                 mime="text/csv"
             )
 
-            # 📈 Aggregated Forecast
+            # Aggregated view
             agg_monthly = all_forecast_df.groupby("Month")["Forecast Qty"].sum().reset_index()
 
             st.subheader("📊 Aggregated Historical Demand")
@@ -98,7 +101,7 @@ if uploaded_file:
             fig_forecast = px.line(agg_monthly, x="Month", y="Forecast Qty", title="Forecasted Monthly Demand")
             st.plotly_chart(fig_forecast, use_container_width=True)
 
-            # 📦 Inventory & Backorder
+            # Inventory & Backorder
             if inv_file is not None and bo_file is not None:
                 inv_df = pd.read_excel(inv_file)
                 bo_df = pd.read_excel(bo_file)
@@ -108,6 +111,7 @@ if uploaded_file:
                 st.subheader("📝 Backorder Data Preview")
                 st.dataframe(bo_df.head())
 
+                # Use latest forecast month
                 latest_forecast = (
                     all_forecast_df.groupby("PN").apply(lambda x: x.sort_values("Month").iloc[-1])
                     .reset_index(drop=True)
@@ -125,22 +129,54 @@ if uploaded_file:
                 merged["Overstock Risk"] = (merged["On Hand"] + merged["In Transit"]) - (merged["Backorder"] + merged["Forecast Qty"])
                 merged["Overstock Flag"] = merged["Overstock Risk"] > 0
 
-                st.subheader("🛑 Overstock Risk Analysis")
+                st.subheader("🛑 AI-Calculated Overstock Risk")
                 st.dataframe(merged[[
                     "PN", "Forecast Qty", "On Hand", "In Transit", "Backorder", "Overstock Risk", "Overstock Flag"
                 ]])
 
-                csv_risk = merged.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Overstock Risk CSV",
-                    data=csv_risk,
-                    file_name="overstock_risk_analysis.csv",
-                    mime="text/csv"
-                )
+                # Upload and compare with OS flags
+                if os_file is not None:
+                    os_df = pd.read_excel(os_file)
+                    os_df.columns = os_df.columns.str.strip()
+                    os_df = os_df.dropna(subset=["PN"])
+                    os_flagged = set(os_df["PN"].unique())
+
+                    merged["OS Flag"] = merged["PN"].isin(os_flagged)
+
+                    def classify(row):
+                        if row["Overstock Flag"] and row["OS Flag"]:
+                            return "✅ Confirmed Overstock (AI + OS)"
+                        elif row["Overstock Flag"]:
+                            return "⚠️ New Overstock (AI only)"
+                        elif row["OS Flag"]:
+                            return "🕘 Previously Flagged (OS only)"
+                        else:
+                            return "🆗 Clear"
+
+                    merged["Combined Status"] = merged.apply(classify, axis=1)
+
+                    st.subheader("🔍 AI + OS Overstock Comparison")
+                    st.dataframe(merged[[
+                        "PN", "Forecast Qty", "On Hand", "In Transit", "Backorder",
+                        "Overstock Risk", "Overstock Flag", "OS Flag", "Combined Status"
+                    ]])
+
+                    combined_csv = merged.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="Download AI + OS Combined Overstock CSV",
+                        data=combined_csv,
+                        file_name="combined_overstock_analysis.csv",
+                        mime="text/csv"
+                    )
+
+                elif os_file:
+                    st.warning("No forecast results to compare against. Upload sales data first.")
+
             elif inv_file or bo_file:
                 st.info("Please upload both Inventory and Backorder files for risk analysis.")
 
             if skipped_pns:
                 st.info(f"Skipped {len(skipped_pns)} PN(s) due to insufficient data: {', '.join(map(str, skipped_pns))}")
+
 else:
     st.info("Please upload your Excel sales forecast to begin.")
